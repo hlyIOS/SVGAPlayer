@@ -44,6 +44,8 @@ open class SVGAPlayer: UIView {
     public var clearsAfterStop: Bool = true
     public var loops: Int = 0
     public var fillMode: String = ""
+    /// RunLoop mode for `CADisplayLink` (default `.common`, aligned with official `NSRunLoopCommonModes`).
+    public var mainRunLoopMode: RunLoop.Mode = .common
 
     public weak var delegate: SVGAPlayerDelegate?
     public var finishAnimation: (() -> Void)?
@@ -86,6 +88,13 @@ open class SVGAPlayer: UIView {
         clearAudios()
     }
 
+    public override func willMove(toSuperview newSuperview: UIView?) {
+        super.willMove(toSuperview: newSuperview)
+        if newSuperview == nil {
+            stopAnimation(clearsAfterStop)
+        }
+    }
+
     // MARK: - Control
 
     public func startAnimation() {
@@ -101,13 +110,17 @@ open class SVGAPlayer: UIView {
         if resetLoopCount {
             loopCount = 0
         }
+        attachDisplayLink(fps: video.FPS)
+        forwardAnimating = !reversing
+    }
+
+    private func attachDisplayLink(fps: Int) {
         displayLink?.invalidate()
         let proxy = _SVGADisplayLinkProxy(self)
         let link = CADisplayLink(target: proxy, selector: #selector(_SVGADisplayLinkProxy.tick))
-        link.preferredFramesPerSecond = video.FPS
-        link.add(to: .main, forMode: .common)
+        link.preferredFramesPerSecond = fps
+        link.add(to: .main, forMode: mainRunLoopMode)
         displayLink = link
-        forwardAnimating = !reversing
     }
 
     /// Resume from pause without resetting loopCount
@@ -153,6 +166,7 @@ open class SVGAPlayer: UIView {
     private func clearAudios() {
         for layer in audioLayers {
             layer.audioPlayer?.stop()
+            layer.audioPlaying = false
         }
     }
 
@@ -165,11 +179,7 @@ open class SVGAPlayer: UIView {
         currentFrame = frame
         update()
         if andPlay {
-            let proxy = _SVGADisplayLinkProxy(self)
-            let link = CADisplayLink(target: proxy, selector: #selector(_SVGADisplayLinkProxy.tick))
-            link.preferredFramesPerSecond = video.FPS
-            link.add(to: .main, forMode: .common)
-            displayLink = link
+            attachDisplayLink(fps: video.FPS)
         }
     }
 
@@ -350,11 +360,18 @@ open class SVGAPlayer: UIView {
 
         if forwardAnimating && !audioLayers.isEmpty {
             for layer in audioLayers {
-                if layer.audioItem.startFrame == currentFrame {
-                    layer.audioPlayer?.currentTime = TimeInterval(Double(layer.audioItem.startTime) / 1000.0)
-                    layer.audioPlayer?.play()
-                } else if layer.audioItem.endFrame <= currentFrame {
+                let item = layer.audioItem
+                if !layer.audioPlaying,
+                   item.startFrame <= currentFrame,
+                   currentFrame <= item.endFrame,
+                   let player = layer.audioPlayer {
+                    player.currentTime = TimeInterval(Double(item.startTime) / 1000.0)
+                    player.play()
+                    layer.audioPlaying = true
+                }
+                if layer.audioPlaying, item.endFrame <= currentFrame {
                     layer.audioPlayer?.stop()
+                    layer.audioPlaying = false
                 }
             }
         }
@@ -411,8 +428,22 @@ open class SVGAPlayer: UIView {
 
     // MARK: - Dynamic API (ObjC compatible)
 
+    private func performOnMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            OperationQueue.main.addOperation(block)
+        }
+    }
+
     @objc(setImage:forKey:)
     public func setImage(_ image: UIImage?, forKey key: String) {
+        performOnMain { [weak self] in
+            self?.applyImage(image, forKey: key)
+        }
+    }
+
+    private func applyImage(_ image: UIImage?, forKey key: String) {
         guard let image = image else { return }
         dynamicObjects[key] = image
         if !contentLayers.isEmpty {
@@ -427,8 +458,22 @@ open class SVGAPlayer: UIView {
         setImage(image, forKey: key)
     }
 
+    @objc(setImageWithURL:forKey:)
+    public func setImageWithURL(_ url: URL, forKey key: String) {
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self, error == nil, let data, let image = UIImage(data: data) else { return }
+            self.setImage(image, forKey: key)
+        }.resume()
+    }
+
     @objc(setAttributedText:forKey:)
     public func setAttributedText(_ attributedText: NSAttributedString?, forKey key: String) {
+        performOnMain { [weak self] in
+            self?.applyAttributedText(attributedText, forKey: key)
+        }
+    }
+
+    private func applyAttributedText(_ attributedText: NSAttributedString?, forKey key: String) {
         guard let text = attributedText else { return }
         dynamicTexts[key] = text
         if !contentLayers.isEmpty {
@@ -454,6 +499,12 @@ open class SVGAPlayer: UIView {
 
     @objc(setDrawingBlock:forKey:)
     public func setDrawingBlock(_ drawingBlock: SVGAPlayerDynamicDrawingBlock?, forKey key: String) {
+        performOnMain { [weak self] in
+            self?.applyDrawingBlock(drawingBlock, forKey: key)
+        }
+    }
+
+    private func applyDrawingBlock(_ drawingBlock: SVGAPlayerDynamicDrawingBlock?, forKey key: String) {
         if let block = drawingBlock {
             dynamicDrawings[key] = block
         } else {
@@ -468,6 +519,12 @@ open class SVGAPlayer: UIView {
 
     @objc(setHidden:forKey:)
     public func setHidden(_ hidden: Bool, forKey key: String) {
+        performOnMain { [weak self] in
+            self?.applyHidden(hidden, forKey: key)
+        }
+    }
+
+    private func applyHidden(_ hidden: Bool, forKey key: String) {
         dynamicHiddens[key] = hidden
         if !contentLayers.isEmpty {
             for layer in contentLayers where layer.isKind(of: SVGAContentLayer.self) && layer.imageKey == key {

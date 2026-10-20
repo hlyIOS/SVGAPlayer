@@ -115,28 +115,44 @@ public final class SVGAParser: NSObject {
             return
         }
 
-        // File cache (proto or json)
-        let protoPath = cacheProtoFilepath(key)
-        let jsonPath = cacheJsonFilepath(key)
-        if FileManager.default.fileExists(atPath: protoPath) ||
-           FileManager.default.fileExists(atPath: jsonPath) {
-            parseFromFileCacheKey(key, completionBlock: { videoItem in
-                NSLog("svga load from file success %@", self.cacheDirectory(key))
-                OperationQueue.main.addOperation {
-                    completionBlock(videoItem)
-                }
-            }, failureBlock: { error in
-                NSLog("svga load from file failure %@ path: %@", error?.localizedDescription ?? "", self.cacheDirectory(key))
-                self.clearCache(key)
-                if let failureBlock {
+        // File cache lookup on parseQueue to avoid main-thread disk stat
+        Self.parseQueue.addOperation { [weak self] in
+            guard let self = self else { return }
+            let protoPath = self.cacheProtoFilepath(key)
+            let jsonPath = self.cacheJsonFilepath(key)
+            if FileManager.default.fileExists(atPath: protoPath) ||
+               FileManager.default.fileExists(atPath: jsonPath) {
+                self.parseFromFileCacheKey(key, completionBlock: { videoItem in
+//                    NSLog("svga load from file success %@", self.cacheDirectory(key))
                     OperationQueue.main.addOperation {
-                        failureBlock(error)
+                        completionBlock(videoItem)
                     }
-                }
-            })
-            return
+                }, failureBlock: { error in
+//                    NSLog("svga load from file failure %@ path: %@", error?.localizedDescription ?? "", self.cacheDirectory(key))
+                    self.clearCache(key)
+                    if let failureBlock {
+                        OperationQueue.main.addOperation {
+                            failureBlock(error)
+                        }
+                    }
+                })
+                return
+            }
+            OperationQueue.main.addOperation {
+                self.enqueueNetworkDownload(
+                    urlRequest: urlRequest,
+                    cacheKey: key,
+                    completionBlock: completionBlock,
+                    failureBlock: failureBlock
+                )
+            }
         }
+    }
 
+    private func enqueueNetworkDownload(urlRequest: URLRequest,
+                                        cacheKey key: String,
+                                        completionBlock: @escaping SVGACompletionBlock,
+                                        failureBlock: SVGAFailureBlock?) {
         // Save failure/completion callbacks (thread-safe)
         let shouldDownload: Bool = Self.mapLock.withLock {
             if let failureBlock {
@@ -148,21 +164,21 @@ public final class SVGAParser: NSObject {
         }
         guard shouldDownload else { return }
 
-        // Download
-        NSLog("svga load from net download begin %@", urlRequest.url?.absoluteString ?? "")
-        let startTime = CACurrentMediaTime()
         URLSession.shared.downloadTask(with: urlRequest) { [weak self] location, _, error in
-            guard let self = self else { return }
+            guard let self = self else {
+                Self.cleanupMap(for: key)
+                return
+            }
             if let error = error as NSError? {
-                NSLog("svga load from net ❌ %@ error：%@", urlRequest.url?.absoluteString ?? "", error.localizedDescription)
+//                NSLog("svga load from net ❌ %@ error：%@", urlRequest.url?.absoluteString ?? "", error.localizedDescription)
                 self.executeCacheFailure(key, error: error)
                 return
             }
             self.parseWithDownloadLocation(location, cacheKey: key, completionBlock: { video in
-                NSLog("svga load from net %@ consume time：%@", urlRequest.url?.absoluteString ?? "", NSNumber(value: CACurrentMediaTime() - startTime))
+//                NSLog("svga load from net %@ consume time：%@", urlRequest.url?.absoluteString ?? "", NSNumber(value: CACurrentMediaTime() - startTime))
                 self.executeCacheCompletion(key, videoItem: video)
             }, failureBlock: { err in
-                NSLog("svga load from net ❌ %@", err?.localizedDescription ?? "")
+//                NSLog("svga load from net ❌ %@", err?.localizedDescription ?? "")
                 self.clearCache(key)
                 self.executeCacheFailure(key, error: err)
             })
@@ -435,6 +451,13 @@ public final class SVGAParser: NSObject {
     }
 
     // MARK: - Callback Coalescing
+
+    private static func cleanupMap(for cacheKey: String) {
+        mapLock.withLock {
+            completionMap.removeValue(forKey: cacheKey)
+            failureMap.removeValue(forKey: cacheKey)
+        }
+    }
 
     private func executeCacheCompletion(_ cacheKey: String, videoItem: SVGAVideoEntity?) {
         let (completions, _): ([SVGACompletionBlock]?, [SVGAFailureBlock]?) = Self.mapLock.withLock {

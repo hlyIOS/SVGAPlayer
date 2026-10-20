@@ -46,7 +46,7 @@ final class SVGABitmapLayer: CALayer {
     /// Rendering logic will be implemented based on SVGAVideoSpriteFrameEntity details.
     func stepToFrame(_ frame: Int) {
         self.drawedFrame = max(0, frame)
-        // TODO: Update `contents` / geometry from `frames[drawedFrame]` when frame model is available.
+      //   源代码就是这样处理的
     }
 
     // MARK: - Private

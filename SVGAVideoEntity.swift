@@ -191,7 +191,7 @@ public final class SVGAVideoEntity: NSObject {
     }
 
     @objc(removeAllCaches)
-    class func removeAllCaches() {
+    public class func removeAllCaches() {
         videoCache.removeAllObjects()
         cacheKeys.removeAll()
     }

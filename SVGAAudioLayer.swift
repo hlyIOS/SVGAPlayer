@@ -8,6 +8,8 @@ final class SVGAAudioLayer: NSObject {
     private(set) var audioPlayer: AVAudioPlayer?
     /// Readonly for ObjC
     let audioItem: SVGAAudioEntity
+    /// Whether this clip is playing (aligned with official SVGAPlayer-iOS).
+    var audioPlaying: Bool = false
 
     /// Exposed to ObjC as: - (instancetype)initWithAudioItem:(SVGAAudioEntity *)audioItem videoItem:(SVGAVideoEntity *)videoItem;
     init(audioItem: SVGAAudioEntity, videoItem: SVGAVideoEntity) {
